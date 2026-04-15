@@ -1,26 +1,175 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #000000;
+  --foreground: #ffffff;
+  --secondary: #999999;
+  --border-dim: #333333;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-secondary: var(--secondary);
+  --color-border-dim: var(--border-dim);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ─── Voice Orb: Idle Pulse ─── */
+@keyframes orb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.orb-idle-pulse {
+  animation: orb-pulse 8s ease-in-out infinite;
+}
+
+/* ─── Voice Orb: Listening Arcs ─── */
+@keyframes arc-radiate {
+  0% { transform: scale(0.5); opacity: 0.8; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+.listening-arc {
+  position: absolute;
+  inset: -20%;
+  border-radius: 50%;
+  border: 1px solid #ffffff;
+  animation: arc-radiate 1.2s ease-out infinite;
+}
+.listening-arc:nth-child(2) { animation-delay: 0.3s; }
+.listening-arc:nth-child(3) { animation-delay: 0.6s; }
+.listening-arc:nth-child(4) { animation-delay: 0.9s; }
+
+/* ─── Voice Orb: Thinking Dots ─── */
+@keyframes orbit-dots {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.thinking-orbit {
+  position: absolute;
+  inset: -12%;
+  animation: orbit-dots 3s linear infinite;
+}
+.thinking-dot {
+  width: 4px;
+  height: 4px;
+  background: #ffffff;
+  border-radius: 50%;
+  position: absolute;
+}
+.thinking-dot:nth-child(1) { top: 0; left: 50%; transform: translateX(-50%); }
+.thinking-dot:nth-child(2) { bottom: 0; left: 50%; transform: translateX(-50%); }
+.thinking-dot:nth-child(3) { left: 0; top: 50%; transform: translateY(-50%); }
+.thinking-dot:nth-child(4) { right: 0; top: 50%; transform: translateY(-50%); }
+
+/* ─── Voice Orb: Speaking Emanate ─── */
+@keyframes emanate-circle {
+  0% { transform: scale(0.3); opacity: 0.6; }
+  100% { transform: scale(2); opacity: 0; }
+}
+.speaking-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid #ffffff;
+  animation: emanate-circle 1.6s ease-out infinite;
+}
+.speaking-ring:nth-child(2) { animation-delay: 0.4s; }
+.speaking-ring:nth-child(3) { animation-delay: 0.8s; }
+.speaking-ring:nth-child(4) { animation-delay: 1.2s; }
+
+/* ─── Full-Screen Waveform Lines ─── */
+@keyframes wave-line-drift {
+  0% { transform: translateY(0) scaleX(1); opacity: 0.15; }
+  50% { transform: translateY(-4px) scaleX(1.02); opacity: 0.3; }
+  100% { transform: translateY(0) scaleX(1); opacity: 0.15; }
+}
+.waveform-line {
+  height: 1px;
+  background: #ffffff;
+  width: 100%;
+  opacity: 0.15;
+  animation: wave-line-drift 2s ease-in-out infinite;
+}
+
+/* ─── First Visit Fade-In ─── */
+@keyframes fade-in-orb {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.orb-entrance {
+  animation: fade-in-orb 600ms ease-out forwards;
+}
+.label-entrance {
+  opacity: 0;
+  animation: fade-in-orb 400ms ease-out 600ms forwards;
+}
+
+/* ─── Mode Transition ─── */
+.mode-enter-from-right {
+  animation: slide-in-right 500ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.mode-exit-to-right {
+  animation: slide-out-right 500ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.mode-enter-from-left {
+  animation: slide-in-left 500ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.mode-exit-to-left {
+  animation: slide-out-left 500ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes slide-in-right {
+  0% { transform: translateX(100%); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+@keyframes slide-out-right {
+  0% { transform: translateX(0); opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+@keyframes slide-in-left {
+  0% { transform: translateX(-100%); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+@keyframes slide-out-left {
+  0% { transform: translateX(0); opacity: 1; }
+  100% { transform: translateX(-100%); opacity: 0; }
+}
+
+/* ─── Bottom Sheet Drawer ─── */
+@keyframes sheet-up {
+  0% { transform: translateY(100%); }
+  100% { transform: translateY(0); }
+}
+@keyframes sheet-down {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(100%); }
+}
+.drawer-enter { animation: sheet-up 400ms ease-out forwards; }
+.drawer-exit { animation: sheet-down 400ms ease-in forwards; }
+
+/* ─── Fade overlay ─── */
+@keyframes fade-in { 0% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes fade-out { 0% { opacity: 1; } 100% { opacity: 0; } }
+.fade-enter { animation: fade-in 400ms ease-out forwards; }
+.fade-exit { animation: fade-out 400ms ease-in forwards; }
+
+/* ─── Streaming cursor ─── */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: "▊";
+  animation: cursor-blink 800ms step-end infinite;
+  color: #ffffff;
 }
