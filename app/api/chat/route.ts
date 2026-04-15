@@ -82,8 +82,8 @@ export async function POST(req: Request) {
         think: false,
         keep_alive: "30m",
         options: {
-          num_predict: 300,
-          num_ctx: 2048,
+          num_predict: 1024,
+          num_ctx: 30720,
           temperature: 0.7,
           top_k: 20,
           top_p: 0.85,
