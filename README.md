@@ -18,6 +18,22 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Model Provider
+
+The app now uses the BitNet API by default for chat and prompt generation.
+
+- `BITNET_BASE_URL` defaults to `http://185.209.230.171:8002`
+- `BITNET_API_KEY` defaults to `bitnet2b`
+- `BITNET_MODEL` defaults to `bitnet`
+
+`/api/chat` keeps the existing frontend stream contract by translating BitNet SSE into line-delimited JSON chunks for the UI.
+
+## Voice Input
+
+Voice mode now prefers browser-native realtime speech recognition when the browser supports it. That gives interim transcript updates and much faster end-of-speech handling for conversational turns.
+
+When realtime speech recognition is unavailable, the app falls back to the existing in-browser Whisper transcription path.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More

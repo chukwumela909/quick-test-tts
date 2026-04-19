@@ -1,5 +1,8 @@
-const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:1.7b";
+import {
+  createBitNetChatCompletion,
+  getBitNetMessageText,
+  readBitNetError,
+} from "../../lib/bitnet";
 
 const META_SYSTEM_PROMPT = `You are a system prompt engineer. The user will describe what kind of AI assistant they want. Your job is to write a clear, concise system prompt that defines that assistant's role, personality, and behavior.
 
@@ -27,34 +30,26 @@ export async function POST(req: Request) {
       );
     }
 
-    const ollamaRes = await fetch(`${OLLAMA_HOST}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [
-          { role: "system", content: META_SYSTEM_PROMPT },
-          { role: "user", content: description.trim() },
-        ],
-        stream: false,
-        think: false,
-        options: {
-          num_predict: 200,
-          temperature: 0.8,
-          top_p: 0.9,
-        },
-      }),
+    const bitNetRes = await createBitNetChatCompletion({
+      messages: [
+        { role: "system", content: META_SYSTEM_PROMPT },
+        { role: "user", content: description.trim() },
+      ],
+      maxTokens: 160,
+      temperature: 0.8,
+      topP: 0.9,
     });
 
-    if (!ollamaRes.ok) {
+    if (!bitNetRes.ok) {
+      const detail = await readBitNetError(bitNetRes);
       return Response.json(
-        { error: `Ollama error: ${ollamaRes.status}` },
-        { status: ollamaRes.status }
+        { error: detail || `BitNet error: ${bitNetRes.status}` },
+        { status: bitNetRes.status }
       );
     }
 
-    const data = await ollamaRes.json();
-    const generated = data.message?.content?.trim() ?? "";
+    const data = await bitNetRes.json();
+    const generated = getBitNetMessageText(data).trim();
 
     if (!generated) {
       return Response.json(

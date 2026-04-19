@@ -13,10 +13,14 @@ import {
   createConversation,
   loadConversations,
   addMessage,
+  deleteMessage,
   loadActiveConversationId,
   saveActiveConversationId,
+  buildLlmHistory,
+  buildInterruptionNote,
 } from "./lib/chat-engine";
 import { type AgentPersona, loadPersona, DEFAULT_PERSONA } from "./lib/persona";
+import { VoiceSession } from "./lib/voice-session";
 
 type Mode = "voice" | "chat";
 
@@ -40,12 +44,25 @@ export default function Home() {
   const [settingsClosing, setSettingsClosing] = useState(false);
 
   /* ── Streaming state ────────────────────────────────── */
-  const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [lastAgentText, setLastAgentText] = useState<string | null>(null);
+  const [session, setSession] = useState<VoiceSession | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const streamingRef = useRef(false);
+  // Live context of the currently-streaming agent turn, exposed so the
+  // VoiceSession.onInterrupted callback can commit the partial agent message
+  // synchronously the instant a barge-in occurs — without racing the new
+  // turn that startListening kicks off. Cleared when the stream ends or is
+  // committed by the interruption path.
+  const activeStreamRef = useRef<{
+    conversationId: string;
+    getFullText: () => string;
+    committed: boolean;
+  } | null>(null);
   const personaRef = useRef<AgentPersona>(persona);
+  const handleUserMessageRef = useRef<
+    (text: string, source: MessageSource) => void
+  >(() => {});
 
   useEffect(() => {
     personaRef.current = persona;
@@ -150,26 +167,44 @@ export default function Home() {
     []
   );
 
-  /* ── Stream agent response from Ollama ───────────────── */
+  /* ── Stream agent response from the chat provider ────── */
   const streamAgentResponse = useCallback(
-    async (conversationId: string, currentMessages: Message[]) => {
+    async (
+      conversationId: string,
+      currentMessages: Message[],
+      shouldSpeak: boolean
+    ) => {
       // Abort any in-flight request
       if (abortRef.current) abortRef.current.abort();
       const controller = new AbortController();
       abortRef.current = controller;
       streamingRef.current = true;
 
-      setAgentSpeaking(true);
       setStreamingContent("");
+      setLastAgentText(null);
 
-      // Build history for the API (last 10 messages for lower latency)
-      const history = currentMessages.slice(-10).map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      // Build history for the API (last 10 messages for lower latency).
+      // buildLlmHistory swaps interrupted agent messages' content for the
+      // spokenContent so the model only sees what the user actually heard.
+      const recent = currentMessages.slice(-10);
+      const history = buildLlmHistory(recent);
+      const interruptionNote = buildInterruptionNote(recent);
 
       // Auto-timeout after 30s
       const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+      // Hoisted so the catch branch can persist whatever streamed so far
+      // when the user barges in mid-reply.
+      let fullText = "";
+      // Publish a handle on this stream so onInterrupted can commit the
+      // partial agent message synchronously. Cleared on natural completion,
+      // by the interruption-commit path, or in the catch's non-abort branch.
+      activeStreamRef.current = {
+        conversationId,
+        getFullText: () => fullText,
+        committed: false,
+      };
+      const myStream = activeStreamRef.current;
 
       // Wait for warmup to finish so the model is loaded before first request
       if (!warmupDoneRef.current && warmupPromiseRef.current) {
@@ -183,6 +218,8 @@ export default function Home() {
           body: JSON.stringify({
             messages: history,
             systemPrompt: personaRef.current.systemPrompt,
+            mode: shouldSpeak ? "voice" : "text",
+            interruptionNote: interruptionNote ?? undefined,
           }),
           signal: controller.signal,
         });
@@ -194,14 +231,54 @@ export default function Home() {
 
         const reader = res.body!.getReader();
         const decoder = new TextDecoder();
-        let fullText = "";
         let ndjsonBuffer = "";
+        // Offset into fullText up to which we've already dispatched TTS chunks.
+        let spokenUpto = 0;
+        let firstChunkFired = false;
+
+        // Determine the next chunk of `fullText` to hand off to TTS.
+        //
+        // First chunk: emit on the FIRST phrase break (, ; : — . ! ? \n) once
+        // we have at least ~20 characters. This shaves ~500–1500ms off TTFA
+        // because Kokoro can start synthesizing while the LLM is still
+        // producing the rest of the reply.
+        //
+        // Subsequent chunks: emit on the LAST sentence boundary seen. Longer
+        // chunks preserve prosody and avoid chunk-boundary micro-gaps.
+        const FIRST_MIN_CHARS = 15;
+        const drainSpeakable = (
+          text: string,
+          from: number,
+          first: boolean
+        ): [string, number] => {
+          const tail = text.slice(from);
+          if (first) {
+            // Emit at first phrase break past the minimum char threshold.
+            const re = /[,;:\u2014.!?\n]/g;
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(tail)) !== null) {
+              const end = m.index + 1;
+              if (end >= FIRST_MIN_CHARS) {
+                return [tail.slice(0, end), from + end];
+              }
+            }
+            return ["", from];
+          }
+          const re = /[^.!?\n]*[.!?\n]+(?:\s|$)/g;
+          let lastEnd = 0;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(tail)) !== null) {
+            lastEnd = re.lastIndex;
+          }
+          if (lastEnd === 0) return ["", from];
+          return [tail.slice(0, lastEnd), from + lastEnd];
+        };
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          // Parse NDJSON lines from Ollama passthrough
+          // Parse the NDJSON stream returned by /api/chat
           ndjsonBuffer += decoder.decode(value, { stream: true });
           const lines = ndjsonBuffer.split("\n");
           ndjsonBuffer = lines.pop() ?? "";
@@ -217,8 +294,24 @@ export default function Home() {
             }
           }
 
-          // Update streaming UI directly — React 18 batches these automatically
-          setStreamingContent(fullText);
+          // In voice turns the streaming text isn't rendered anywhere visible
+          // (VoiceMode shows the final `lastAgentText`), so skip the state
+          // update to avoid render churn that contends with the TTS pump.
+          if (!shouldSpeak) setStreamingContent(fullText);
+
+          // Pump complete chunks into the TTS queue as soon as they land.
+          if (shouldSpeak && session) {
+            const [chunk, nextUpto] = drainSpeakable(
+              fullText,
+              spokenUpto,
+              !firstChunkFired
+            );
+            if (chunk) {
+              session.speakChunk(chunk);
+              spokenUpto = nextUpto;
+              firstChunkFired = true;
+            }
+          }
         }
 
         // Process any remaining buffer
@@ -235,24 +328,44 @@ export default function Home() {
         // Commit final message
         clearTimeout(timeoutId);
         setStreamingContent(null);
-        setAgentSpeaking(false);
         abortRef.current = null;
         streamingRef.current = false;
 
-        if (fullText.trim()) {
-          const agentMsg = createMessage("agent", fullText.trim(), "text");
-          appendMessage(conversationId, agentMsg);
-          setLastAgentText(fullText.trim());
+        // Interruption path may have already committed this turn; in that
+        // case we just clean up state and return.
+        if (myStream.committed) {
+          if (activeStreamRef.current === myStream) activeStreamRef.current = null;
+          return;
         }
+
+        if (fullText.trim()) {
+          const trimmed = fullText.trim();
+          const agentMsg = createMessage("agent", trimmed, "text");
+          appendMessage(conversationId, agentMsg);
+          setLastAgentText(trimmed);
+          if (shouldSpeak && session) {
+            // Flush any trailing partial sentence into the queue.
+            const remainder = fullText.slice(spokenUpto).trim();
+            if (remainder) session.speakChunk(remainder);
+            // Wait for all queued clips to finish so state returns to idle.
+            void session.endSpeaking();
+          }
+        }
+        if (activeStreamRef.current === myStream) activeStreamRef.current = null;
       } catch (err: unknown) {
         clearTimeout(timeoutId);
-        if ((err as Error).name === "AbortError") {
+        const aborted = (err as Error).name === "AbortError";
+        if (aborted) {
           streamingRef.current = false;
+          // The interruption-commit path (onInterrupted) already handled
+          // persistence if it fired. If not, this is a non-interruption
+          // abort (e.g. cancel via onCancel) — drop the partial.
+          setStreamingContent(null);
+          if (activeStreamRef.current === myStream) activeStreamRef.current = null;
           return;
         }
         console.error("Streaming error:", err);
         setStreamingContent(null);
-        setAgentSpeaking(false);
         abortRef.current = null;
         streamingRef.current = false;
 
@@ -265,7 +378,7 @@ export default function Home() {
         appendMessage(conversationId, errorMsg);
       }
     },
-    [appendMessage]
+    [appendMessage, session]
   );
 
   /* ── Handle user message (voice or text) ────────────── */
@@ -285,10 +398,90 @@ export default function Home() {
       // Read from ref to avoid stale closure on rapid sends
       const latestConv = conversationsRef.current.find((c) => c.id === cid);
       const updatedMessages = [...(latestConv?.messages ?? []), userMsg];
-      streamAgentResponse(cid, updatedMessages);
+      const shouldSpeak = source === "voice";
+      streamAgentResponse(cid, updatedMessages, shouldSpeak);
     },
     [activeId, appendMessage, streamAgentResponse]
   );
+
+  // Keep a ref so the VoiceSession's onTranscript callback (created once) always
+  // calls the latest handleUserMessage with current activeId/persona/etc.
+  useEffect(() => {
+    handleUserMessageRef.current = handleUserMessage;
+  }, [handleUserMessage]);
+
+  /* ── Regenerate the last agent reply ───────────────── */
+  const handleRegenerate = useCallback(
+    (messageId: string) => {
+      const cid = activeId;
+      if (!cid) return;
+      // Refuse to regenerate while a stream is in flight — the user should
+      // either let it finish or hit STOP first.
+      if (streamingRef.current) return;
+
+      const conv = conversationsRef.current.find((c) => c.id === cid);
+      if (!conv) return;
+      const last = conv.messages[conv.messages.length - 1];
+      // Only the trailing agent reply is eligible. This keeps regenerate
+      // strictly destructive (one row), no branch / cascade semantics.
+      if (!last || last.id !== messageId || last.role !== "agent") return;
+
+      const prefix = conv.messages.slice(0, -1);
+
+      // Drop the trailing agent message from local state, then fire the DB
+      // delete (best-effort — failures log a warning, do not block UI).
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === cid
+            ? { ...c, messages: prefix, updatedAt: new Date() }
+            : c
+        )
+      );
+      void deleteMessage(cid, messageId);
+
+      // Re-run the LLM with the same prior history. Regenerate is text-only;
+      // voice barge-in already covers the spoken-mode equivalent.
+      streamAgentResponse(cid, prefix, false);
+    },
+    [activeId, streamAgentResponse]
+  );
+
+  /* ── Voice session lifecycle ────────────────────────── */
+  useEffect(() => {
+    const s = new VoiceSession({
+      onTranscript: (text) => {
+        handleUserMessageRef.current(text, "voice");
+      },
+      onCancel: () => {
+        abortRef.current?.abort();
+      },
+      onInterrupted: (spokenText) => {
+        // Commit the partial agent message synchronously before any new turn
+        // starts. Reading from activeStreamRef avoids racing the new
+        // streamAgentResponse that startListening will eventually trigger.
+        const stream = activeStreamRef.current;
+        if (stream && !stream.committed) {
+          stream.committed = true;
+          const fullText = stream.getFullText().trim();
+          const trimmed = fullText || spokenText;
+          const agentMsg = createMessage("agent", trimmed, "text");
+          agentMsg.spokenContent = spokenText;
+          agentMsg.interrupted = true;
+          appendMessage(stream.conversationId, agentMsg);
+          setLastAgentText(trimmed);
+        }
+        // Aborting the in-flight LLM stream lets the catch branch unwind
+        // quickly. The committed flag prevents double-persist.
+        abortRef.current?.abort();
+      },
+    });
+    setSession(s);
+    return () => s.dispose();
+  }, []);
+
+  useEffect(() => {
+    session?.setActive(mode === "voice");
+  }, [session, mode]);
 
   /* ── Overlay helpers ────────────────────────────────── */
   const openDrawer = useCallback(() => {
@@ -516,6 +709,11 @@ export default function Home() {
         onPointerDown={onPointerDown}
         onClickCapture={onClickCapture}
       >
+        {/* Ambient depth layers (behind everything) */}
+        <div className="ambient-backdrop" aria-hidden />
+        <div className="ambient-vignette" aria-hidden />
+        <div className="ambient-grain" aria-hidden />
+
         {/* Mode indicator dots */}
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex gap-1.5">
         <div
@@ -553,7 +751,7 @@ export default function Home() {
       {/* ── Horizontal slider — both modes side-by-side ── */}
       <div
         ref={sliderRef}
-        className="flex flex-1 min-h-0"
+        className="relative z-10 flex flex-1 min-h-0"
         style={{
           width: "200%",
           willChange: "transform",
@@ -571,13 +769,8 @@ export default function Home() {
           }}
         >
           <VoiceMode
-            onVoiceMessage={(text) => handleUserMessage(text, "voice")}
-            agentSpeaking={agentSpeaking}
+            session={session}
             agentText={lastAgentText}
-            onAgentFinished={() => {
-              setAgentSpeaking(false);
-              setLastAgentText(null);
-            }}
             active={mode === "voice"}
           />
         </div>
@@ -602,21 +795,27 @@ export default function Home() {
               setSliderPos(0, true);
               setMode("voice");
             }}
+            onStopGenerating={() => {
+              // Commit whatever has streamed so far before aborting, so the
+              // user keeps the partial answer in their thread.
+              const stream = activeStreamRef.current;
+              if (stream && !stream.committed) {
+                stream.committed = true;
+                const partial = stream.getFullText().trim();
+                if (partial) {
+                  const agentMsg = createMessage("agent", partial, "text");
+                  appendMessage(stream.conversationId, agentMsg);
+                  setLastAgentText(partial);
+                }
+              }
+              abortRef.current?.abort();
+            }}
+            onRegenerate={handleRegenerate}
           />
         </div>
       </div>
 
-      {/* Bottom hint (voice mode only, no overlays) */}
-      {mode === "voice" && !drawerOpen && !settingsOpen && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
-          <span
-            className="font-mono text-[10px] text-secondary uppercase"
-            style={{ letterSpacing: "1.2px" }}
-          >
-            SWIPE LEFT FOR CHAT · UP FOR HISTORY
-          </span>
-        </div>
-      )}
+      {/* Bottom hint removed — voice screen is orb + transcripts only */}
 
       {/* Conversation drawer overlay */}
       {drawerOpen && (

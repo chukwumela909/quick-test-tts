@@ -11,13 +11,6 @@ interface VoiceOrbProps {
   compact?: boolean;
 }
 
-const LABELS: Record<OrbState, string> = {
-  idle: "TAP TO SPEAK",
-  listening: "LISTENING...",
-  thinking: "THINKING...",
-  speaking: "SPEAKING...",
-};
-
 export default function VoiceOrb({
   state,
   onTap,
@@ -44,7 +37,7 @@ export default function VoiceOrb({
     return (
       <button
         onClick={onTap}
-        className="orb-idle-pulse flex-shrink-0 rounded-full border border-white bg-black
+        className="orb-idle-pulse orb-surface flex-shrink-0 rounded-full border border-white
                    h-[48px] w-[48px] cursor-pointer transition-transform duration-150 active:scale-95"
         aria-label="Switch to voice mode"
       />
@@ -56,14 +49,14 @@ export default function VoiceOrb({
       {/* Orb container (relative for overlays) */}
       <button
         type="button"
-        className="relative h-[180px] w-[180px] md:h-[200px] md:w-[200px] lg:h-[240px] lg:w-[240px] bg-transparent border-none p-0"
+        className="orb-float relative h-[180px] w-[180px] md:h-[200px] md:w-[200px] lg:h-[240px] lg:w-[240px] bg-transparent border-none p-0"
         onClick={handleClick}
         style={{ cursor: "pointer" }}
       >
         {/* Core orb circle */}
         <div
-          className={`absolute inset-0 rounded-full border border-white bg-black transition-opacity duration-300 ${
-            state === "idle" ? "orb-idle-pulse" : ""
+          className={`orb-surface absolute inset-0 rounded-full border border-white transition-all duration-500 ${
+            state === "idle" ? "orb-idle-pulse" : "orb-surface-active"
           }`}
         />
 
@@ -97,14 +90,6 @@ export default function VoiceOrb({
           </>
         )}
       </button>
-
-      {/* State label */}
-      <span
-        className="font-mono text-[12px] uppercase text-secondary"
-        style={{ letterSpacing: "1.2px" }}
-      >
-        {LABELS[state]}
-      </span>
     </div>
   );
 }

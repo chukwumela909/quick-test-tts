@@ -1,44 +1,64 @@
-const TTS_URL = process.env.TTS_URL || "http://185.209.230.171:8000/tts";
+const KOKORO_URL =
+  process.env.KOKORO_URL || "http://54.38.215.166:8880/v1/audio/speech";
+const KOKORO_VOICE = process.env.KOKORO_VOICE || "af_heart";
 
 /**
- * Proxy POST to pocket-tts to avoid CORS issues.
- * Accepts FormData with a "text" field, returns audio blob.
+ * Proxy POST to Kokoro (OpenAI-compatible /v1/audio/speech) with streaming.
+ * Accepts JSON `{ text, voice?, speed? }`, returns streamed `audio/mpeg`.
+ * The body is forwarded chunk-by-chunk so the client can play audio while
+ * synthesis is still running.
  */
 export async function POST(req: Request) {
+  let text: string;
+  let voice: string;
+  let speed: number;
   try {
-    const form = await req.formData();
-    const text = form.get("text");
-
-    if (!text || typeof text !== "string" || !text.trim()) {
-      return Response.json({ error: "Text field required" }, { status: 400 });
+    const body = await req.json();
+    const t = body?.text;
+    if (typeof t !== "string" || !t.trim()) {
+      return Response.json({ error: "text field required" }, { status: 400 });
     }
-
-    if (text.length > 2000) {
-      return Response.json({ error: "Text too long (max 2000 chars)" }, { status: 400 });
+    if (t.length > 2000) {
+      return Response.json(
+        { error: "Text too long (max 2000 chars)" },
+        { status: 400 }
+      );
     }
+    text = t.trim();
+    voice = typeof body?.voice === "string" && body.voice ? body.voice : KOKORO_VOICE;
+    speed = typeof body?.speed === "number" ? body.speed : 1.0;
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-    const ttsForm = new FormData();
-    ttsForm.append("text", text.trim());
-
-    const res = await fetch(TTS_URL, {
+  try {
+    const upstream = await fetch(KOKORO_URL, {
       method: "POST",
-      body: ttsForm,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "kokoro",
+        input: text,
+        voice,
+        response_format: "mp3",
+        stream: true,
+        speed,
+      }),
       signal: AbortSignal.timeout(60_000),
     });
 
-    if (!res.ok) {
+    if (!upstream.ok || !upstream.body) {
       return Response.json(
-        { error: `TTS server error: ${res.status}` },
+        { error: `TTS server error: ${upstream.status}` },
         { status: 502 }
       );
     }
 
-    const audioBlob = await res.blob();
-
-    return new Response(audioBlob, {
+    // Stream the mp3 bytes straight through. The browser side uses MSE
+    // (see app/lib/tts.ts) so playback starts on the first chunk.
+    return new Response(upstream.body, {
       headers: {
-        "Content-Type": res.headers.get("Content-Type") || "audio/wav",
-        "Content-Length": String(audioBlob.size),
+        "Content-Type": "audio/mpeg",
+        "Cache-Control": "no-store",
       },
     });
   } catch {
